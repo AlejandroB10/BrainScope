@@ -23,64 +23,72 @@ inspection.
 
 # 2. Where I am right now
 
-I went a bit further than I had planned for the intermediate. Objective 1
-is essentially complete and Objective 2 has a working coregistration
-pipeline. Objective 3 hasn't started yet.
+I ended up pushing further than the intermediate strictly required.
+Objective 1 is fully covered, Objective 2 runs end-to-end in physical
+coordinates with the inverse transform and the mask propagation already
+wired, and Objective 3 has a classical baseline scaffold with the AI
+swap-in as the next step. Total project completion sits around 60-65%.
 
 **Objective 1.** `src/loading.py` reads both DICOMs, reshapes the flat
-`(1692, 256, 256)` `int16` PET array into `(36 frames, 47 slices, 256,
-256)`, computes the temporal mean and the last frame, and saves three
-artifacts under `docs/figures/`: a static composite of the median planes
-for the last frame and the temporal mean, the same composite for the MR
-T1, and a 36-frame GIF that sweeps the three median planes across time.
-The reshape order was confirmed against `FramePositionsVector` (every z
-position appears once per temporal frame) and validated visually by
-reloading the result into 3D Slicer through the MCP bridge: the temporal
-mean reads as a recognisable brain (Figure 1).
+`(1692, 256, 256)` `int16` PET array into `(36, 47, 256, 256)`, computes
+the temporal mean and the last frame, and saves median-plane composites
+plus a 36-frame GIF that sweeps the three median planes across time.
+The reshape order was confirmed against `FramePositionsVector` and
+validated visually by reloading the result into 3D Slicer through the
+MCP bridge (Figure 1).
 
-![PET temporal mean reloaded into 3D Slicer through the MCP bridge. The volume is anatomically coherent and the metabolic activity is consistent with the lesion seen on the MR T1.](../../figures/01_pet_temporal_mean_in_slicer.png){width=58%}
+![PET temporal mean reloaded into 3D Slicer through the MCP bridge. The volume is anatomically coherent.](../../figures/01_pet_temporal_mean_in_slicer.png){width=55%}
 
-`src/coregistration.py` covers the **Objective 2** pipeline end-to-end. It
-implements a rigid model with translation plus axial rotation around the
-volume centre (Rodrigues), a Mutual Information loss computed from a
-32-bin joint histogram, and an optimisation driver that calls
-`scipy.optimize.minimize` with the Powell method. Running it on a
-downsampled `(48, 64, 64)` grid (the speed-vs-physics compromise I
-describe below) takes ~10 seconds and moves Mutual Information from
-`0.408` (identity init) to `0.526` (Figure 2).
+The Objective 2.b rotating MIP has also landed:
+`src/visualization.py` builds a 24-frame turntable showing the MR alone,
+the coregistered PET alone and the alpha fusion of both
+(`docs/figures/06_rotating_mip.gif`).
 
-![Rigid coregistration before (top) vs after (bottom). MR T1 in gray, PET temporal mean in hot. The PET footprint tightens onto the MR brain after the optimisation.](../../figures/05_coreg_before_after.png){width=58%}
+**Objective 2.** `src/coregistration.py` is now fully physical-coordinate
+aware. It builds 4×4 affines from `ImagePositionPatient`,
+`ImageOrientationPatient`, `PixelSpacing` and `SpacingBetweenSlices`,
+resamples PET onto the MR voxel grid through those affines, and only
+then runs the rigid optimisation. Mutual Information climbs from
+`0.068` at identity to `0.131` after Powell (+93%). The inverse rigid
+parameters are derived analytically from the forward ones and saved next
+to the figures, ready to push masks back to PET space (Figure 2).
 
-**Objective 3** hasn't begun yet. It's parked behind the model choice,
-which I cover in the open questions.
+![Rigid coregistration before (top) vs after (bottom) on the MR voxel grid.](../../figures/05_coreg_before_after.png){width=55%}
 
-A few things on the to-do list. The rotating-MIP animation of Objective
-2.b is not yet done. The registration runs on voxel space after isotropic
-downsampling; the full pipeline must pull the PET / MR voxel-to-physical
-affines from the DICOM headers and resample on a common physical grid
-(top of the list after this submission). The Objective 3 mask
-propagation, the inverse transform, and the numerical coregistration
-assessment are all parked behind the Objective 3 work.
+**Objective 3.** `src/segmentation.py` locates a candidate centroid
+inside the PET-MR Z overlap, builds a bounding box around it, maps both
+to MR voxel coordinates through the DICOM affines, and runs a 3D
+`skimage.morphology.flood` region growing constrained to that box. The
+mask is then propagated back to the PET native grid through the chain
+*inverse rigid · inverse DICOM resample*, closing the loop the proposal
+asks for. Region growing is a placeholder until the AI general-purpose
+model is integrated; the interface already takes the same prompt
+(centroid + bbox), so the swap is mechanical.
+
+**Still missing.** The AI general-purpose segmentation model
+(MedSAM2 / nnInteractive / SAMed-2 / SAT) is the open item — see
+question 9. There's no ground-truth mask yet, so Dice / Jaccard /
+Hausdorff aren't computed. The 5-page final document hasn't been
+written.
 
 # 3. How I'm planning to attack the rest
 
-The Objective 2 cleanup comes first: build voxel-to-physical affines from
-`ImagePositionPatient` / `ImageOrientationPatient` / `PixelSpacing` /
-`SpacingBetweenSlices`, resample PET onto the MR grid in physical
-coordinates, rerun the MI optimisation there. Once that lands, the
-rotating MIP animation drops out almost for free. Objective 3 then runs
-the chosen AI model on the MR side, prompted by a bounding box placed
-manually in 3D Slicer, and the resulting mask is propagated back to the
-PET space via the inverse rigid.
+The biggest open item is the AI general-purpose segmentation. I'd like
+to land MedSAM2 on the MR volume prompted by the bounding box already in
+place, then evaluate the mask against whatever ground truth is
+available. Once that's running I'll close Objective 2's last detail (a
+target registration error from a few Slicer-placed fiducials, on top of
+the Mutual Information already reported). Then the 5-page final document
+ties everything together.
 
 # 4. Risks I'm watching
 
 | Risk                                                          | Mitigation                                                              |
 |---------------------------------------------------------------|-------------------------------------------------------------------------|
-| Voxel-space registration hides physical mismatches            | Switch to physical-coordinate registration before the final submission   |
-| Mutual Information local maxima                               | Multi-start initialisation; PyElastix as a sanity check                  |
-| AI segmentation model too heavy for the local hardware        | Pre-screen models; classical region growing as fallback                 |
-| Time pressure on Objective 3                                  | Keep the rotating-MIP polish minimal so the model work has runway        |
+| AI segmentation model too heavy for the local hardware        | Pre-screen MedSAM2 / nnInteractive sizes; keep region growing as fallback |
+| Mutual Information stuck at a local maximum                   | Multi-start initialisation; PyElastix as a sanity check                   |
+| No ground-truth mask, segmentation hard to assess numerically | Use volume / sphericity as proxies; ask for a reference mask if available |
+| Final document writing time                                   | Outline now, write while the model integration is running                 |
 
 The list of open questions on the next pages is the input I need from
 you to lock those decisions before going further.
@@ -133,12 +141,12 @@ Grouped by stage, ordered roughly by impact on the final grade.
    Final MI, residual landmark distances, target registration error from
    Slicer-placed fiducials, or a combination?
 
-8. **Voxel-space shortcut.** The current pipeline registers in voxel
-   space after isotropic downsampling. Lifting it to physical-coordinate
-   registration is on my plate. Is doing both versions (voxel and
-   physical) something you'd value as a discussion in the final document,
-   or do you prefer just the physical one with the voxel one dropped from
-   the report?
+8. **Optimisation grid resolution.** The pipeline now resamples PET
+   onto the MR grid in physical coordinates, but the rigid optimisation
+   itself still runs on a 2× downsampled version of both volumes for
+   speed. Is that downsampling acceptable in the final report, or do you
+   want the optimisation at full resolution even if it costs minutes
+   per run?
 
 ## Objective 3 — 3D image segmentation
 

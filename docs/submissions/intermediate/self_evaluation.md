@@ -10,18 +10,17 @@ fontsize: 11pt
 
 Mark each completed item and the numerical self-qualification.
 
-> **A note before the form.** This is the intermediate submission, but I
-> ended up implementing more than I had originally planned for it. Most of
-> Objective 1 is in place (load, reshape, static views, animated GIF) and
-> Objective 2 has a working rigid-coregistration pipeline (translation +
-> axial rotation, Mutual Information loss, Powell optimizer, before/after
-> visual overlay). Objective 3 hasn't started yet. The scoring below tries
-> to be conservative — I'd rather under-report than over-claim while still
-> waiting for feedback.
+> **A note before the form.** I went further than I had planned for this
+> intermediate. Objective 1 is done from load all the way to the rotating
+> MIP. Objective 2 runs end-to-end in physical coordinates with the
+> inverse transform and the mask propagation already in place. Objective
+> 3 has a working scaffold around a classical region-growing baseline,
+> with the AI general-purpose model (MedSAM2, nnInteractive, SAMed-2 or
+> SAT) as the next step. Project completion sits around 60-65%.
 
 \vspace{0.3cm}
 
-## Objective 1 — DICOM loading and visualization \hfill **7 / 10**
+## Objective 1 — DICOM loading and visualization \hfill **9 / 10**
 
 **Load PET dynamic study and MR T1 reference**
 
@@ -32,22 +31,23 @@ Mark each completed item and the numerical self-qualification.
 
 The PET array is reshaped into `(36 frames, 47 slices, 256, 256)`. The
 reshape order was confirmed both mathematically (every z position in
-`FramePositionsVector` repeats once per frame) and visually (loading the
-temporal mean back into 3D Slicer through the MCP bridge produces a
-recognisable brain volume).
+`FramePositionsVector` repeats once per frame) and visually by reloading
+the temporal mean back into 3D Slicer through the MCP bridge.
 
 **Rotating MIP**
 
 - [x] At least one Maximum Intensity Projection has been created.
 - [x] The image and the regions are both clearly identifiable: colormaps have been correctly used, alpha fusion is used.
-- [ ] An interactive animation (GIF) with at least 16 projections has been shown.
+- [x] An interactive animation (GIF) with at least 16 projections has been shown.
 
-I do save a 36-frame median-planes animation; the *rotating* MIP itself is
-left for the next iteration.
+The 24-frame rotating MIP animation lives at
+`docs/figures/06_rotating_mip.gif`. It shows the MR alone, the
+coregistered PET alone, and the alpha-fused overlay turning around the
+axial axis.
 
 \vspace{0.3cm}
 
-## Objective 2 — 3D rigid coregistration \hfill **4 / 10**
+## Objective 2 — 3D rigid coregistration \hfill **8 / 10**
 
 **Image coregistration**
 
@@ -57,48 +57,66 @@ left for the next iteration.
 - [x] An optimizer has been successfully used to find the optimal parameters of a rigid motion.
 - [x] The correctness of the coregistration has been verified with visualizations.
 
-The pipeline runs on a downsampled `(48, 64, 64)` grid for speed (a
-limitation I want to lift before the final submission). Mutual Information
-goes from `0.408` at identity to `0.526` after Powell optimisation, with a
-clearly tighter PET / MR overlap on the saved before/after MIP overlay.
+The pipeline now works in physical coordinates. PET is resampled onto
+the MR voxel grid via DICOM affines, and Mutual Information goes from
+`0.068` at identity to `0.131` after Powell optimisation (+93%). The
+optimisation runs on a 2× downsampled grid for speed; the final transform
+is applied at full resolution.
 
 **Mask and assessment**
 
-- [ ] The mask has been transformed into the input space.
-- [ ] The inverse transformation has been explicitly found.
-- [ ] Both the input image and the transformed mask have been visualized together.
-- [ ] Numerical values have been implemented to measure the correctness of the coregistration process.
+- [x] The mask has been transformed into the input space.
+- [x] The inverse transformation has been explicitly found.
+- [x] Both the input image and the transformed mask have been visualized together.
+- [x] Numerical values have been implemented to measure the correctness of the coregistration process.
 
-Mask propagation depends on Objective 3, so it's parked for now.
+The inverse rigid parameters are computed analytically from the forward
+ones (`apply_rigid_in_volume` plus axis-angle inversion) and stored in
+`coreg_transform.npz`. The Objective 3 mask is propagated MR → PET
+native through the chain *inverse rigid · inverse DICOM resample* and
+shown overlaid on the PET last frame in
+`docs/figures/09_segmentation_mask_on_pet_native.png`.
 
 \vspace{0.3cm}
 
-## Objective 3 — 3D image segmentation \hfill **0 / 10**
+## Objective 3 — 3D image segmentation \hfill **4 / 10**
 
-Not started yet. The progress document includes specific questions about
-which model to pick (MedSAM2 / nnInteractive / SAMed-2 / SAT) and on which
-modality to run it.
+The segmentation pipeline runs end-to-end with a classical baseline,
+but the AI general-purpose model named in the proposal is still pending.
 
 **Segmentation**
 
-- [ ] The centroid and bounding box of the tumor have been calculated.
-- [ ] A segmentation algorithm has been implemented, and it uses either the centroid or the bounding box.
-- [ ] The segmentation algorithm works on volumetric 3D images, rather than on single slices.
+- [x] The centroid and bounding box of the tumor have been calculated.
+- [x] A segmentation algorithm has been implemented, and it uses either the centroid or the bounding box.
+- [x] The segmentation algorithm works on volumetric 3D images, rather than on single slices.
 - [ ] The segmentation algorithm extracts the tumoral region up to its borders.
+
+The candidate centroid is auto-located inside the PET-MR Z overlap and
+mapped to MR voxel coordinates. A 3D `skimage.morphology.flood`
+region-growing then runs on the MR, constrained to the bounding box.
+The current mask volume (around 36 k voxels in MR, 8 k after propagation back
+to PET native) is too generous compared to a real tumor — that's why
+the AI model is the priority next step.
 
 **Assessment**
 
-- [ ] Both the input image and the automatically segmented mask have been visualized together.
+- [x] Both the input image and the automatically segmented mask have been visualized together.
 - [ ] The provided and automatically segmented masks have been visualized together, and can be easily compared.
 - [ ] Numerical values have been implemented to measure the correctness of the automatic segmentation.
 
+A reference mask isn't available yet, so Dice / Jaccard / Hausdorff are
+in the open questions. The visual overlay on the PET last frame stands
+in for the qualitative comparison for now.
+
 \vspace{0.3cm}
 
-## Submission \hfill **3 / 10**
+## Submission \hfill **5 / 10**
 
-The repo carries actual content now (runnable scripts, generated figures,
-the GIF, the registration before/after) on top of the README and the
-environment file. The final 5-page document is still ahead of us.
+The repository now carries five Python modules (`loading`,
+`coregistration`, `visualization`, `segmentation`, `utils`), nine figures
+in `docs/figures/`, the saved transform, and the binary masks. The README
+walks through structure, environment, and usage. The 5-page final
+document is still ahead.
 
 **Document**
 
@@ -119,14 +137,13 @@ environment file. The final 5-page document is still ahead of us.
 
 | Section          | Weight | Score   |
 |------------------|--------|---------|
-| Objective 1      | 25 %   | 7 / 10  |
-| Objective 2      | 25 %   | 4 / 10  |
-| Objective 3      | 25 %   | 0 / 10  |
-| Submission       | 25 %   | 3 / 10  |
-| **Total**        | 100 %  | **3.5 / 10** |
+| Objective 1      | 25 %   | 9 / 10  |
+| Objective 2      | 25 %   | 8 / 10  |
+| Objective 3      | 25 %   | 4 / 10  |
+| Submission       | 25 %   | 5 / 10  |
+| **Total**        | 100 %  | **6.5 / 10** |
 
-The number is intentionally moderate. Objective 3 and the clean
-physical-coordinate version of the registration are the parts that
-actually carry the grade, and they're still ahead. The whole point of
-this submission is the feedback, so it makes sense to leave the score
-on the cautious side.
+The number is meant to reflect actual progress (~65% of the project) and
+flag the remaining work: integrating the AI segmentation model on the
+MR side, computing proper similarity / overlap metrics, and writing the
+final 5-page document.
