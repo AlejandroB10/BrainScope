@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Environment
+.env
+.envrc
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+results/
+*.gif
+*.mp4
+*.log
+
+# DICOM raw data (kept outside git: large files)
+data/raw/
+*.dcm
+*.IMA
+data/*/
+!data/README.md
+!data/.gitkeep
+
+# 3D Slicer scenes
+*.mrml
+*.mrb
+*.nrrd
+*.nii
+*.nii.gz
+
+# Submissions exports (keep .md/.tex sources, ignore generated PDFs in build folder)
+docs/submissions/build/
+
+# Local planning artifacts — not shared with the public repo
+openspec/

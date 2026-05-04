@@ -1,0 +1,20 @@
+name: medical-image-processing-11763
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - matplotlib
+  - opencv
+  - pydicom
+  - scikit-image
+  - scikit-learn
+  - jupyter
+  - pillow
+  - pip
+  - pip:
+      - SimpleITK
+      - imageio
+      - tqdm
