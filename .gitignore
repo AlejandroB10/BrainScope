@@ -7,7 +7,7 @@ __pycache__/
 .venv/
 venv/
 env/
-build/
+/build/
 dist/
 *.egg-info/
 .eggs/
@@ -31,9 +31,10 @@ Thumbs.db
 
 # Project-specific
 results/
-*.gif
 *.mp4
 *.log
+# Ignore generated GIFs in results/ but keep curated figures under docs/
+results/*.gif
 
 # DICOM raw data (kept outside git: large files)
 data/raw/
@@ -50,8 +51,8 @@ data/*/
 *.nii
 *.nii.gz
 
-# Submissions exports (keep .md/.tex sources, ignore generated PDFs in build folder)
-docs/submissions/build/
+# Note: docs/submissions/intermediate/build/*.pdf are tracked on purpose
+# (the rendered PDFs are part of what the professor can browse on the repo).
 
 # Local planning artifacts — not shared with the public repo
 openspec/
