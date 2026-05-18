@@ -56,3 +56,22 @@ data/*/
 
 # Local planning artifacts — not shared with the public repo
 openspec/
+# Local AI runtime state
+.atl/
+
+# AI segmentation: manual bbox config (example template stays tracked)
+data/tumor_bbox.yaml
+!data/tumor_bbox.yaml.example
+
+# Vendored external AI dependency — cloned locally, not committed
+external/MedSAM2/
+
+# Transient NIfTI exports produced during AI segmentation pipeline
+results/*.nii.gz
+
+# Local agent guidance — not shared with the public repo
+CLAUDE.md
+
+# Testing infrastructure stays local (development-only, not part of submission)
+tests/
+pytest.ini

@@ -15,6 +15,21 @@ dependencies:
   - pillow
   - pip
   - pip:
+      # NOTE — MedSAM2 is NOT listed here.
+      # It must be installed as an editable clone after env creation:
+      #   git clone https://github.com/bowang-lab/MedSAM2.git external/MedSAM2
+      #   pip install -e external/MedSAM2/
+      # Reason: MedSAM2 requires editable mode so its internal imports resolve
+      # correctly; a standard pip install from PyPI is not available.
       - SimpleITK
       - imageio
       - tqdm
+      - pytest
+      # PyTorch with CUDA 12.4 wheels: the system driver is CUDA 13.0, which is
+      # backward-compatible with cu124 wheels (driver >= 12.4 is sufficient).
+      - torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+      - torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu124
+      # TotalSegmentator: brain mask extraction via total_mr task (class 50).
+      # Do not pin nnunetv2/nibabel/dicom2nifti — let TotalSegmentator resolve
+      # its own compatible versions to avoid manual pinning churn.
+      - TotalSegmentator
