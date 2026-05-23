@@ -1,0 +1,20 @@
+# Manual tumor bounding box for the AI segmentation pipeline.
+# Coordinates are in PET native voxel space (z, y, x).
+# The pipeline maps them to MR voxel space via the DICOM affines built in src/coregistration.py.
+#
+# schema_version: increment when field semantics change in a breaking way.
+# centroid_pet_native_voxel: [z, y, x] — integer voxel index of the tumor centre in the
+#   PET temporal-mean volume (0-indexed). Valid range: within PET volume bounds.
+# half_extent_voxel: [dz, dy, dx] — half-widths of the bounding box in each axis (PET voxels).
+#   Typical brain tumor values: dz in [2, 10], dy/dx in [10, 50].
+schema_version: 1
+centroid_pet_native_voxel: [33, 162, 74]
+half_extent_voxel: [4, 25, 25]
+
+# Optional: MR-space coordinates if you already mapped them yourself.
+# centroid_mr_voxel: [15, 168, 107]
+# half_extent_mr_voxel: [4, 25, 25]
+
+# Optional: MedSAM2 key slice z-indices in MR voxel space.
+# If omitted, the wrapper picks z_centre and z_centre +/- 5.
+# key_slices_mr: [10, 15, 20]
