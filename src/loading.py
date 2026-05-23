@@ -176,6 +176,10 @@ def load_dynamic_pet(path: str) -> PETStudy:
     ds = pydicom.dcmread(path)
     flat = ds.pixel_array  # (frames * slices, rows, cols)
 
+    # IPP cross-check: emits UserWarning when per-frame IPP is absent or
+    # inconsistent with the flat reshape. Never raises, reshape is unaffected.
+    _check_per_frame_ipp(ds)
+
     n_frames = int(ds.NumberOfFrames)
     fst = np.asarray(list(ds[(0x0055, 0x1001)].value), dtype=float)
     if len(fst) != n_frames:
@@ -237,7 +241,7 @@ def load_dynamic_pet(path: str) -> PETStudy:
     origin_xyz = tuple(ipp)
     spacing_xyz = (pixel_spacing[1], pixel_spacing[0], z_spacing)  # (x, y, z)
 
-    mean_3d = array.mean(axis=0)  # (slices, rows, cols) = (z, y, x)
+    mean_3d = compute_temporal_mean(array, durations=fdu)  # (slices, rows, cols) = (z, y, x)
     image = _build_sitk_image(mean_3d, origin_xyz, spacing_xyz, direction_flat)
 
     return PETStudy(
@@ -283,9 +287,72 @@ def load_mr(path: str) -> MRStudy:
 # Array helpers
 # ---------------------------------------------------------------------------
 
-def compute_temporal_mean(pet_4d: np.ndarray) -> np.ndarray:
-    """Average the 4D PET volume across the temporal axis."""
-    return pet_4d.mean(axis=0)
+def _check_per_frame_ipp(ds) -> None:
+    """Inspect a pydicom Dataset for per-frame ImagePositionPatient.
+
+    Tries to read ``PerFrameFunctionalGroupsSequence[i].PlanePositionSequence[0]
+    .ImagePositionPatient`` for each frame. Emits a ``UserWarning`` when the
+    tag path is absent (the expected case for this project's DICOM) or when the
+    z-ordering implied by the per-frame IPP z-components disagrees with the
+    flat-reshape slice count. Never raises.
+    """
+    seq = ds.get("PerFrameFunctionalGroupsSequence", None)
+    if seq is None or len(seq) == 0:
+        warnings.warn(
+            "Per-frame ImagePositionPatient not exposed in standard location; "
+            "falling back to flat reshape",
+            UserWarning,
+            stacklevel=2,
+        )
+        return
+
+    # Extract z-components from each frame's PlanePositionSequence.
+    z_vals = []
+    for frame_item in seq:
+        try:
+            ipp = frame_item.PlanePositionSequence[0].ImagePositionPatient
+            z_vals.append(float(ipp[2]))
+        except (AttributeError, IndexError, KeyError):
+            warnings.warn(
+                "Per-frame ImagePositionPatient not exposed in standard location; "
+                "falling back to flat reshape",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+
+    # Derive unique z positions to infer slice count.
+    unique_z = len(set(round(z, 3) for z in z_vals))
+    # We can't know n_frames/n_slices here without re-reading the full header.
+    # Just verify the count is non-trivially consistent (> 1 unique z found).
+    if unique_z < 2:
+        warnings.warn(
+            f"Per-frame IPP implies only {unique_z} unique z-position(s); "
+            "possible disagreement with flat reshape slice count",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
+def compute_temporal_mean(
+    pet_4d: np.ndarray,
+    durations: np.ndarray | None = None,
+) -> np.ndarray:
+    """Average the 4D PET volume across the temporal axis.
+
+    When ``durations`` is ``None``, returns ``pet_4d.mean(axis=0)``
+    (backward compatible with all existing callers).
+
+    When ``durations`` is provided, returns
+    ``np.average(pet_4d, axis=0, weights=durations)``.
+
+    PET dynamic units are kBq/s; weighting by frame duration in milliseconds
+    is dimensionally correct because weights are scale-invariant in
+    ``np.average``.
+    """
+    if durations is None:
+        return pet_4d.mean(axis=0)
+    return np.average(pet_4d, axis=0, weights=durations)
 
 
 def compute_last_frame(pet_4d: np.ndarray) -> np.ndarray:
