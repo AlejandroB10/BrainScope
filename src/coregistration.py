@@ -20,8 +20,10 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import time
+import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -48,6 +50,8 @@ __all__ = [
     "coregister",
     "save_before_after",
     "mutual_information",
+    "normalised_mutual_information",
+    "save_mi_convergence",
 ]
 
 
@@ -116,44 +120,89 @@ def resample_to_reference(
     )
 
 
-def build_initial_euler3d(moving: sitk.Image) -> sitk.Euler3DTransform:
-    """Build a zero Euler3DTransform centred on the moving image's physical centre.
+def _physical_centroid(image: sitk.Image) -> tuple[float, float, float]:
+    """Return the physical coordinate of the bounding-box centre of image (mm).
 
-    The rotation centre is the physical coordinate of the voxel-array centre,
-    computed via TransformContinuousIndexToPhysicalPoint. This matches the
-    semantics of the previous hand-rolled implementation (rotate around the
-    centre of the volume) so the MI optimisation baseline is preserved.
+    Uses TransformContinuousIndexToPhysicalPoint on the midpoint of the voxel
+    index grid so that arbitrary origin/spacing/direction matrices are handled
+    uniformly by SimpleITK (see ADR-2).
     """
-    size = list(moving.GetSize())
+    size = image.GetSize()
     centre_index = [(s - 1) / 2.0 for s in size]
-    centre_physical = moving.TransformContinuousIndexToPhysicalPoint(centre_index)
+    return image.TransformContinuousIndexToPhysicalPoint(centre_index)
+
+
+def build_initial_euler3d(
+    moving: sitk.Image,
+    fixed: sitk.Image | None = None,
+) -> sitk.Euler3DTransform:
+    """Build a zero-rotation Euler3DTransform centred on the moving image.
+
+    The rotation centre is the physical coordinate of the voxel-array centre.
+
+    When ``fixed`` is provided the translation is initialised to
+    ``centroid(fixed) - centroid(moving)`` in physical coordinates (mm), which
+    centres the moving image's bounding box on the fixed image's bounding box
+    before the optimiser starts (see ADR-2).
+
+    When ``fixed`` is ``None`` the translation is ``(0, 0, 0)`` — backward
+    compatible with all existing callers.
+    """
+    centre_moving = _physical_centroid(moving)
     tx = sitk.Euler3DTransform()
-    tx.SetCenter(centre_physical)
+    tx.SetCenter(list(centre_moving))
+    if fixed is not None:
+        centre_fixed = _physical_centroid(fixed)
+        translation = tuple(cf - cm for cf, cm in zip(centre_fixed, centre_moving))
+        tx.SetTranslation(list(translation))
     return tx
 
 
 # ---------------------------------------------------------------------------
-# Mutual Information loss (unchanged from the original implementation)
+# Normalised Mutual Information (NMI) — replaces plain MI (ADR-1, ADR-3)
 # ---------------------------------------------------------------------------
 
-def mutual_information(a: np.ndarray, b: np.ndarray, bins: int = 32) -> float:
-    """Shannon mutual information between two equal-shape arrays.
 
-    Uses a bins x bins joint histogram to estimate the marginal and joint
-    probabilities, then returns H(a) + H(b) - H(a, b).
+def normalised_mutual_information(
+    a: np.ndarray,
+    b: np.ndarray,
+    bins: int = 16,
+) -> float:
+    """Normalised Mutual Information: NMI(A, B) = (H(A) + H(B)) / H(A, B).
+
+    Shannon entropy is estimated from a ``bins``-bin histogram of each
+    marginal and the joint distribution.
+
+    Returns ``0.0`` when ``H(A, B) == 0`` (degenerate / constant input) to
+    prevent division-by-zero and avoid confusing the Powell optimiser (ADR-3).
+
+    For identical volumes NMI approaches ``2.0``; for independent volumes NMI
+    approaches ``1.0``; for multi-modal PET/MR pairs NMI typically lies in
+    ``[1.0, 1.5]``.
     """
     a = a.ravel()
     b = b.ravel()
-    hist, _, _ = np.histogram2d(a, b, bins=bins)
-    pxy = hist / (hist.sum() + 1e-12)
+    hist_2d, _, _ = np.histogram2d(a, b, bins=bins)
+    pxy = hist_2d / hist_2d.sum() if hist_2d.sum() > 0 else hist_2d
     px = pxy.sum(axis=1)
     py = pxy.sum(axis=0)
 
-    def H(p):
-        nz = p[p > 0]
-        return -np.sum(nz * np.log2(nz))
+    nz_xy = pxy > 0
+    nz_x = px > 0
+    nz_y = py > 0
 
-    return float(H(px) + H(py) - H(pxy))
+    h_xy = -np.sum(pxy[nz_xy] * np.log(pxy[nz_xy]))
+    h_x = -np.sum(px[nz_x] * np.log(px[nz_x]))
+    h_y = -np.sum(py[nz_y] * np.log(py[nz_y]))
+
+    if h_xy == 0:
+        return 0.0
+    return float((h_x + h_y) / h_xy)
+
+
+# Backward-compatible alias — any code importing ``mutual_information`` by
+# name continues to work; new code should use the canonical name (ADR-1).
+mutual_information = normalised_mutual_information
 
 
 # ---------------------------------------------------------------------------
@@ -163,50 +212,60 @@ def mutual_information(a: np.ndarray, b: np.ndarray, bins: int = 32) -> float:
 def coregister(
     moving: sitk.Image,
     fixed: sitk.Image,
-    bins: int = 32,
+    bins: int = 16,
     max_iter: int = 60,
     initial_transform: sitk.Euler3DTransform | None = None,
     verbose: bool = True,
 ) -> dict:
-    """Maximise Mutual Information by optimising a 6-DOF Euler3DTransform.
+    """Maximise Normalised Mutual Information by optimising a 6-DOF Euler3DTransform.
 
     The inner closure resamples the moving image with sitk.Resample, pulls
-    both volumes as zero-copy numpy views, and passes them to the existing
-    32-bin histogram MI objective. scipy.optimize.minimize with the Powell
-    method drives the search.
+    both volumes as zero-copy numpy views, and passes them to the 16-bin
+    histogram NMI objective. scipy.optimize.minimize with the Powell method
+    drives the search.
+
+    When ``initial_transform`` is ``None`` the transform is initialised with
+    ``build_initial_euler3d(moving, fixed=fixed)`` so the bounding boxes are
+    aligned before the first objective evaluation.
 
     Returns a dict containing:
         transform         – the optimal sitk.Euler3DTransform
         inverse_transform – transform.GetInverse() as sitk.Euler3DTransform
         forward_params    – 7-element numpy array for .npz compat
         inverse_params    – 7-element numpy array for .npz compat
-        mi_initial        – MI value at the first evaluation
-        mi_final          – MI value at the optimum
+        nmi_initial       – NMI value at iteration 0 (before any step)
+        nmi_final         – NMI value at the optimum
+        nmi_history       – list[tuple[int, float]] — (iteration_index, nmi)
+        mi_initial        – alias of nmi_initial (backward compat)
+        mi_final          – alias of nmi_final (backward compat)
         n_iter            – total objective evaluations
         elapsed_s         – wall-clock seconds
     """
     if initial_transform is None:
-        initial_transform = build_initial_euler3d(moving)
+        initial_transform = build_initial_euler3d(moving, fixed=fixed)
 
     pixel_id = moving.GetPixelID()
-    history: list[float] = []
+    # nmi_history records (iteration_index, nmi_value) tuples (ADR-4).
+    nmi_history: list[tuple[int, float]] = []
+    iter_count = [0]
 
-    def negative_mi(params):
+    def negative_nmi(params):
         tx = sitk.Euler3DTransform(initial_transform)
         tx.SetParameters(tuple(float(p) for p in params))
         warped = sitk.Resample(moving, fixed, tx, sitk.sitkLinear, 0.0, pixel_id)
         a = sitk.GetArrayViewFromImage(warped)
         b = sitk.GetArrayViewFromImage(fixed)
-        mi = mutual_information(a, b, bins=bins)
-        history.append(mi)
-        if verbose and len(history) % 20 == 0:
-            print(f"    iter {len(history):4d} | MI = {mi:.5f}")
-        return -mi
+        nmi = normalised_mutual_information(a, b, bins=bins)
+        nmi_history.append((iter_count[0], float(nmi)))
+        iter_count[0] += 1
+        if verbose and iter_count[0] % 20 == 0:
+            print(f"    iter {iter_count[0]:4d} | NMI = {nmi:.5f}")
+        return -nmi
 
     x0 = np.array(initial_transform.GetParameters())
     t0 = time.time()
     result = minimize(
-        negative_mi,
+        negative_nmi,
         x0=x0,
         method="Powell",
         options={"maxiter": max_iter, "xtol": 1e-3, "ftol": 1e-4},
@@ -247,16 +306,99 @@ def coregister(
     except Exception:
         inverse_params = forward_params.copy()
 
+    nmi_initial = nmi_history[0][1] if nmi_history else None
+    nmi_final = -float(result.fun)
+
     return {
         "transform": best_tx,
         "inverse_transform": inv_tx,
         "forward_params": forward_params,
         "inverse_params": inverse_params,
-        "mi_initial": history[0] if history else None,
-        "mi_final": -result.fun,
-        "n_iter": len(history),
+        "nmi_initial": nmi_initial,
+        "nmi_final": nmi_final,
+        "nmi_history": nmi_history,
+        # Backward-compat aliases so existing callers using mi_initial/mi_final still work.
+        "mi_initial": nmi_initial,
+        "mi_final": nmi_final,
+        "n_iter": len(nmi_history),
         "elapsed_s": elapsed,
     }
+
+
+# ---------------------------------------------------------------------------
+# Convergence persistence helper (ADR-6)
+# ---------------------------------------------------------------------------
+
+
+def save_mi_convergence(
+    history: list[tuple[int, float]],
+    json_path,
+    png_path,
+) -> None:
+    """Persist the NMI convergence trace to JSON and PNG.
+
+    Parameters
+    ----------
+    history:
+        List of ``(iteration_index, nmi_value)`` tuples as returned by
+        ``coregister()["nmi_history"]``.
+    json_path:
+        Path for the JSON output file. JSON keys: ``iterations``,
+        ``nmi_values``, ``initial``, ``final``, ``metric``.
+    png_path:
+        Path for the PNG convergence plot.
+
+    Side effects only — no return value.
+
+    When ``history`` is empty: emits a ``UserWarning`` and returns without
+    writing any files (guard against degenerate optimisation runs).
+    """
+    if not history:
+        warnings.warn(
+            "Empty NMI history passed to save_mi_convergence; "
+            "skipping convergence save",
+            UserWarning,
+            stacklevel=2,
+        )
+        return
+
+    iterations = [entry[0] for entry in history]
+    nmi_values = [entry[1] for entry in history]
+    initial_nmi = nmi_values[0]
+    final_nmi = nmi_values[-1]
+
+    json_path = Path(json_path)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    convergence_data = {
+        "iterations": iterations,
+        "nmi_values": nmi_values,
+        "initial": initial_nmi,
+        "final": final_nmi,
+        "metric": "NMI",
+    }
+    with open(json_path, "w") as f:
+        json.dump(convergence_data, f, indent=2)
+
+    png_path = Path(png_path)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+
+    import matplotlib
+    matplotlib.use("Agg")
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(iterations, nmi_values, marker="o", markersize=3, linewidth=1.5,
+            label="NMI per evaluation")
+    ax.axhline(initial_nmi, color="orange", linestyle="--", linewidth=1.0,
+               label=f"Initial NMI = {initial_nmi:.4f}")
+    ax.axhline(final_nmi, color="green", linestyle="--", linewidth=1.0,
+               label=f"Final NMI = {final_nmi:.4f}")
+    ax.set_xlabel("Iteration index")
+    ax.set_ylabel("NMI")
+    ax.set_title("Coregistration NMI evolution (Powell optimiser)")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(str(png_path), dpi=120, bbox_inches="tight")
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -474,12 +616,12 @@ if __name__ == "__main__":
     pet_ds_norm = _normalise(pet_ds_image)
     mr_ds_norm = _normalise(mr_ds_image)
 
-    print("Running rigid coregistration (Powell, max 60 iter) ...")
-    res = coregister(pet_ds_norm, mr_ds_norm, bins=32, max_iter=60, verbose=True)
+    print("Running rigid coregistration (Powell, max 60 iter, NMI bins=16) ...")
+    res = coregister(pet_ds_norm, mr_ds_norm, bins=16, max_iter=60, verbose=True)
 
-    print(f"  Initial MI : {res['mi_initial']:.5f}")
-    print(f"  Final   MI : {res['mi_final']:.5f}")
-    print(f"  Improvement: {(res['mi_final'] - res['mi_initial']) / res['mi_initial'] * 100:+.1f} %")
+    print(f"  Initial NMI : {res['nmi_initial']:.5f}")
+    print(f"  Final   NMI : {res['nmi_final']:.5f}")
+    print(f"  Improvement: {(res['nmi_final'] - res['nmi_initial']) / res['nmi_initial'] * 100:+.1f} %")
     print(f"  Iterations : {res['n_iter']}")
     print(f"  Elapsed    : {res['elapsed_s']:.1f} s")
     p6 = np.array(res["transform"].GetParameters())
@@ -515,8 +657,8 @@ if __name__ == "__main__":
         tfm_path=tfm_out,
         npz_path=npz_out,
         extra={
-            "mi_initial": res["mi_initial"],
-            "mi_final": res["mi_final"],
+            "mi_initial": res["nmi_initial"],
+            "mi_final": res["nmi_final"],
             "downsample_factor": factor,
             "mr_shape": np.array(mr_vol.shape),
             "pet_shape": np.array(pet_mean_arr.shape),
@@ -530,5 +672,14 @@ if __name__ == "__main__":
     # Verify round-trip read.
     tx_back = load_rigid_transform(tfm_out)
     print(f"  .tfm re-loaded OK: params = {np.array(tx_back.GetParameters())}")
+
+    # Save NMI convergence trace.
+    results_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "results")
+    os.makedirs(results_dir, exist_ok=True)
+    mi_json_path = os.path.join(results_dir, "mi_convergence.json")
+    mi_png_path = os.path.join(out_dir, "15_mi_convergence.png")
+    save_mi_convergence(res["nmi_history"], mi_json_path, mi_png_path)
+    print(f"  NMI convergence JSON -> {mi_json_path}")
+    print(f"  NMI convergence PNG  -> {mi_png_path}")
 
     print("Done.")
