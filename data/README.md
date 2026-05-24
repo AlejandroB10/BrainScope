@@ -1,8 +1,7 @@
 # Data
 
 This folder is **not** tracked in git: the DICOM volumes are large and live
-outside the repository. Both studies are delivered as single multi-frame
-DICOM files (one per acquisition):
+outside the repository. Each acquisition is a single multi-frame DICOM file:
 
 ```
 data/
