@@ -1,11 +1,16 @@
-"""Generate figure 16: MedSAM2 tumor mask overlaid on PET temporal mean.
+"""Generate figure 16: MedSAM2 tumor mask overlaid on the PET last frame.
 
 The tumor mask lives in MR space. This script:
-1. Loads the PET DICOM and computes the duration-weighted temporal mean.
+1. Loads the PET DICOM and extracts the last temporal frame (peak tracer uptake).
 2. Loads the coregistration transform from docs/figures/coreg_transform.tfm.
 3. Loads the MR-space tumor mask from results/tumor_mask_mr_medsam2.nii.gz.
 4. Resamples the tumor mask to PET space via the inverse transform.
 5. Saves the overlay to docs/figures/16_pet_tumor_mask_overlay.png.
+
+The last frame is preferred over the duration-weighted temporal mean because the
+mean averages early-frame wash-in (low absolute uptake) with the late steady-state
+plateau, washing out the tumor signal. The last frame shows peak tracer
+concentration, which is what makes the lesion most visible in PET.
 
 Run:
     python scripts/generate_pet_tumor_figure.py
@@ -57,11 +62,13 @@ def main() -> None:
             "results/tumor_mask_mr_medsam2.nii.gz."
         )
 
-    # --- Load PET and compute duration-weighted temporal mean ---
+    # --- Load PET and extract the LAST FRAME (peak tracer uptake) ---
     print("Loading dynamic PET ...")
     pet_study = load_dynamic_pet(pet_dicom_path)
-    pet_mean_image = pet_study.image  # sitk.Image; duration-weighted temporal mean
-    print(f"  PET size (x,y,z): {pet_mean_image.GetSize()}")
+    last_frame_arr = pet_study.array[-1]  # shape (n_slices, rows, cols)
+    pet_last_image = sitk.GetImageFromArray(last_frame_arr.astype("float32"))
+    pet_last_image.CopyInformation(pet_study.image)  # preserve PET geometry
+    print(f"  PET size (x,y,z): {pet_last_image.GetSize()}  (last frame, peak uptake)")
 
     # --- Load coregistration transform (MR-space -> PET-space via inverse) ---
     print("Loading coregistration transform ...")
@@ -81,7 +88,7 @@ def main() -> None:
     print("Resampling tumor mask to PET space ...")
     tumor_in_pet = sitk.Resample(
         tumor_mask_mr,
-        pet_mean_image,
+        pet_last_image,
         inverse_transform,
         sitk.sitkNearestNeighbor,
         0.0,
@@ -93,11 +100,11 @@ def main() -> None:
     # --- Save overlay figure ---
     print(f"Saving overlay to {out_path} ...")
     save_pet_brain_mask_overlay(
-        pet_mean_image,
+        pet_last_image,
         tumor_in_pet,
         out_path,
         title=(
-            "PET (temporal mean) with MedSAM2 tumor mask "
+            "PET (last frame, peak uptake) with MedSAM2 tumor mask "
             "(resampled to PET space)"
         ),
     )
