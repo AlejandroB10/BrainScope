@@ -75,3 +75,6 @@ CLAUDE.md
 # Testing infrastructure stays local (development-only, not part of submission)
 tests/
 pytest.ini
+
+# Speaker scripts for the oral presentation — local only
+notebooks/demo_script_*.md
